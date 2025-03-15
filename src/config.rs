@@ -11,11 +11,14 @@ pub struct ProxmoxAuth {
     pub url: String,
     pub user: String,
     pub password: String,
+
+    #[serde(default)]
+    pub allow_invalid_cert: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmConfig {
-    pub host_name: String,
+    pub node: String,
     pub vmid: String,
     pub friendly_name: String,
 
@@ -31,10 +34,13 @@ pub struct VmConfig {
     /// we reset it.
     pub grace_period: u64,
 
+    pub reset_duration: u64,
+
     pub telegram_bot_token: Option<String>,
     pub telegram_chat_id: Option<String>,
 
     /// If this is true, then enforcing will not happen.
     /// Instead, we'll send a message if we would reset the VM.
+    #[serde(default)]
     pub dry_run: bool,
 }

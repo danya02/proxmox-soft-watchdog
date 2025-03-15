@@ -1,0 +1,8 @@
+{
+    "proxmox_auth": {
+        "url": "http://127.0.0.1:8006",
+        "user": "root@pam",
+        "password": "password"
+    },
+    "vm_configs": []
+}

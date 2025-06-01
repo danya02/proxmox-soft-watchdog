@@ -1,13 +1,16 @@
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
+use reqwest_retry::{RetryTransientMiddleware, RetryableStrategy, policies::ExponentialBackoff};
 
 use crate::config;
+
+type ReqError = reqwest_middleware::Error;
 
 #[derive(Clone)]
 pub struct Api {
     inner: Arc<Inner>,
-    client: reqwest::Client,
+    client: reqwest_middleware::ClientWithMiddleware,
 }
 
 struct Inner {
@@ -19,8 +22,34 @@ struct Inner {
     ticket_expiry: Mutex<std::time::Instant>,
 }
 
+struct MyRetryableStrategy;
+
+impl RetryableStrategy for MyRetryableStrategy {
+    fn handle(
+        &self,
+        res: &Result<reqwest::Response, reqwest_middleware::Error>,
+    ) -> Option<reqwest_retry::Retryable> {
+        match res {
+            // retry all errors in sending
+            Err(_) => Some(reqwest_retry::Retryable::Transient),
+
+            Ok(_) => {
+                // Any response is considered OK
+                None
+            }
+        }
+    }
+}
+
 impl Api {
     pub fn from_config(conf: &config::ProxmoxAuth) -> Self {
+        let retry_policy = ExponentialBackoff::builder()
+            .retry_bounds(
+                std::time::Duration::from_millis(100),
+                std::time::Duration::from_secs(3),
+            )
+            .build_with_max_retries(3);
+
         Self {
             inner: Arc::new(Inner {
                 base_url: conf.url.clone(),
@@ -30,13 +59,21 @@ impl Api {
                 csrf: Mutex::new(None),
                 ticket_expiry: Mutex::new(std::time::Instant::now()),
             }),
-            client: reqwest::Client::builder()
-                .danger_accept_invalid_certs(conf.allow_invalid_cert)
-                .build()
-                .expect("failed to build reqwest client"),
+            client: reqwest_middleware::ClientBuilder::new(
+                reqwest::Client::builder()
+                    .danger_accept_invalid_certs(conf.allow_invalid_cert)
+                    .build()
+                    .expect("failed to build reqwest client"),
+            )
+            .with(RetryTransientMiddleware::new_with_policy_and_strategy(
+                retry_policy,
+                MyRetryableStrategy,
+            ))
+            .build(),
         }
     }
 
+    #[tracing::instrument(skip(self), level = "debug")]
     pub async fn get_ticket(&self) -> (String, String) {
         // If there is a cached ticket and it hasn't yet expired,
         // return it.
@@ -101,12 +138,12 @@ impl Api {
         }
     }
 
+    #[tracing::instrument(name = "ticketed_request", skip(self), level = "debug")]
     async fn ticketed_request(
         &self,
         method: reqwest::Method,
         path: &str,
-    ) -> reqwest::RequestBuilder {
-        tracing::debug!("Ticketed request {}", path);
+    ) -> reqwest_middleware::RequestBuilder {
         let url = format!("{}/api2/json{}", self.inner.base_url, path);
         let (ticket, csrf) = self.get_ticket().await;
         self.client
@@ -115,7 +152,8 @@ impl Api {
             .header("CSRFPreventionToken", csrf)
     }
 
-    pub async fn ping_guest_agent(&self, config: &config::VmConfig) -> Result<(), reqwest::Error> {
+    #[tracing::instrument(skip(self, config))]
+    pub async fn ping_guest_agent(&self, config: &config::VmConfig) -> Result<(), ReqError> {
         tracing::debug!("Pinging guest agent");
         let res = self
             .ticketed_request(
@@ -130,12 +168,14 @@ impl Api {
         res.error_for_status()?;
         Ok(())
     }
+
+    #[tracing::instrument(skip(self, config, path, content))]
     pub async fn guest_agent_write_file(
         &self,
         config: &config::VmConfig,
         path: &str,
         content: &[u8],
-    ) -> Result<(), reqwest::Error> {
+    ) -> Result<(), ReqError> {
         tracing::debug!("Writing guest agent file {}", path);
         let content = base64::engine::general_purpose::STANDARD.encode(content);
         let res = self
@@ -160,11 +200,12 @@ impl Api {
         Ok(())
     }
 
+    #[tracing::instrument(skip(self, config, path))]
     pub async fn guest_agent_read_file(
         &self,
         config: &config::VmConfig,
         path: &str,
-    ) -> Result<String, reqwest::Error> {
+    ) -> Result<String, ReqError> {
         tracing::debug!("Reading guest agent file {}", path);
         let res = self
             .ticketed_request(
@@ -186,10 +227,11 @@ impl Api {
         Ok(content.to_string())
     }
 
+    #[tracing::instrument(skip(self, config))]
     pub async fn get_is_machine_running(
         &self,
         config: &config::VmConfig,
-    ) -> Result<bool, reqwest::Error> {
+    ) -> Result<bool, ReqError> {
         tracing::debug!("Getting VM status from hypervisor");
         let res = self
             .ticketed_request(
@@ -198,15 +240,17 @@ impl Api {
             )
             .await
             .send()
-            .await?;
+            .await?
+            .error_for_status()?;
 
-        let json: serde_json::Value = res.json().await.unwrap();
+        let json: serde_json::Value = res.json().await.expect("failed to parse response as JSON");
         let status = json["data"]["status"].as_str().unwrap();
         Ok(status == "running")
     }
 
-    pub async fn reset_vm(&self, config: &config::VmConfig) -> Result<(), reqwest::Error> {
-        tracing::debug!("Resetting VM in hypervisor");
+    #[tracing::instrument(skip(self, config))]
+    pub async fn reset_vm(&self, config: &config::VmConfig) -> Result<(), ReqError> {
+        tracing::info!("Resetting VM in hypervisor");
         let res = self
             .ticketed_request(
                 reqwest::Method::POST,

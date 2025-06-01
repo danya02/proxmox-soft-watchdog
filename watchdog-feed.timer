@@ -1,5 +1,6 @@
 [Unit]
 Description=Run Watchdog Service every minute
+Documentation=https://github.com/danya02/proxmox-soft-watchdog
 
 [Timer]
 OnActiveSec=1min

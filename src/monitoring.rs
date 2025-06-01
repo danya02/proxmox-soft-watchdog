@@ -1,3 +1,5 @@
+use reqwest_retry::{RetryTransientMiddleware, policies::ExponentialBackoff};
+
 use crate::{api, config};
 
 pub enum SingleMachineMonitoringState {
@@ -42,7 +44,7 @@ pub struct SingleMachineMonitoring {
 
     api: api::Api,
 
-    tg_client: reqwest::Client,
+    tg_client: reqwest_middleware::ClientWithMiddleware,
 
     /// How many times in a row has the guest agent ping failed?
     ping_fail_count: u32,
@@ -54,13 +56,16 @@ pub struct SingleMachineMonitoring {
 
 impl SingleMachineMonitoring {
     pub fn new(api: api::Api, config: config::VmConfig) -> Self {
+        let retry_policy = ExponentialBackoff::builder().build_with_max_retries(3);
         Self {
             state: SingleMachineMonitoringState::NoData,
             config,
             api,
             ping_fail_count: 0,
             last_sent_threshold: None,
-            tg_client: reqwest::Client::new(),
+            tg_client: reqwest_middleware::ClientBuilder::new(reqwest::Client::new())
+                .with(RetryTransientMiddleware::new_with_policy(retry_policy))
+                .build(),
         }
     }
 
@@ -96,7 +101,7 @@ impl SingleMachineMonitoring {
             }
             (Err(why), _) => {
                 // Error getting is_machine_running, just continue
-                tracing::error!("Failed to get is_machine_running: {}", why);
+                tracing::error!("Failed to get is_machine_running: {:?}", why);
                 return;
             }
         }
@@ -229,7 +234,7 @@ impl SingleMachineMonitoring {
                                     );
                                     self.say("Watchdog failed to parse /tmp/watchdog_reset_after as a Unix time. Grace period started").await;
                                     self.say(&format!(
-                                        "The current text in /tmp/watchdog_reset_after is: \n\n```\n{}\n```",
+                                        "The current text in /tmp/watchdog_reset_after is: \n\n{}",
                                         &reset_time,
                                     ))
                                     .await;

@@ -35,7 +35,7 @@ async fn test_single_vm(api: api::Api, vm_config: config::VmConfig) {
         let vmid = &vm_config.vmid;
         monitor
             .tick()
-            .instrument(tracing::info_span!("monitoring tick", vmid = vmid))
+            .instrument(tracing::info_span!("tick", vmid = vmid))
             .await;
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }

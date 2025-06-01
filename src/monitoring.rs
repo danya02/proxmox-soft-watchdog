@@ -5,6 +5,9 @@ pub enum SingleMachineMonitoringState {
     /// Contained is the Unixtime the machine has set.
     Ok(std::time::SystemTime),
 
+    /// The machine's timer value hasn't been received yet.
+    NoData,
+
     /// The machine's timer is unusually far into the future.
     TooFar(std::time::SystemTime),
 
@@ -52,7 +55,7 @@ pub struct SingleMachineMonitoring {
 impl SingleMachineMonitoring {
     pub fn new(api: api::Api, config: config::VmConfig) -> Self {
         Self {
-            state: SingleMachineMonitoringState::Ok(std::time::SystemTime::now()),
+            state: SingleMachineMonitoringState::NoData,
             config,
             api,
             ping_fail_count: 0,
@@ -66,11 +69,12 @@ impl SingleMachineMonitoring {
 
         match (is_machine_running, &self.state) {
             (Ok(false), SingleMachineMonitoringState::PowerOff) => {
-                // Machine is still powered off, nothing to do.
+                tracing::debug!("Machine is still powered off, nothing to do.");
                 return;
             }
             (Ok(true), SingleMachineMonitoringState::PowerOff) => {
                 // Machine is now powered on, start monitoring.
+                tracing::debug!("Machine was off, is now on");
                 self.say("Machine has been powered on, beginnning reset timer")
                     .await;
                 self.state = SingleMachineMonitoringState::Resetting(
@@ -79,15 +83,20 @@ impl SingleMachineMonitoring {
                 );
                 self.ping_fail_count = 0;
             }
+            (Ok(true), _) => {
+                // Machine is still powered on
+            }
             (Ok(false), _) => {
+                tracing::debug!("Machine is now powered off, and we are still monitoring");
                 // Machine is now powered off, stop monitoring.
                 self.say("Machine has been powered off, stopping monitoring")
                     .await;
                 self.state = SingleMachineMonitoringState::PowerOff;
                 return;
             }
-            _ => {
+            (Err(why), _) => {
                 // Error getting is_machine_running, just continue
+                tracing::error!("Failed to get is_machine_running: {}", why);
                 return;
             }
         }
@@ -105,7 +114,7 @@ impl SingleMachineMonitoring {
                 // so resume monitoring.
                 self.say("Machine reset timer has completed, resuming monitoring")
                     .await;
-                self.state = SingleMachineMonitoringState::Ok(std::time::SystemTime::now());
+                self.state = SingleMachineMonitoringState::NoData;
             }
         }
 
@@ -126,7 +135,7 @@ impl SingleMachineMonitoring {
                 self.ping_fail_count = 0;
             }
             Err(e) => {
-                println!("VMID {} ping failed: {}", self.config.vmid, e);
+                tracing::info!("VMID {} ping failed: {}", self.config.vmid, e);
                 self.ping_fail_count += 1;
 
                 // If the machine failed 5 pings in a row,
@@ -163,9 +172,10 @@ impl SingleMachineMonitoring {
                 )
                 .await
             {
-                println!(
+                tracing::info!(
                     "VMID {} write_file /tmp/watchdog_current_unix_time failed: {}",
-                    self.config.vmid, why
+                    self.config.vmid,
+                    why
                 );
 
                 // Failing writes are a big deal, so move it to the grace period right away.
@@ -203,9 +213,10 @@ impl SingleMachineMonitoring {
                     Ok(reset_time) => {
                         match reset_time.trim().parse::<u64>() {
                             Err(why) => {
-                                println!(
+                                tracing::info!(
                                     "VMID {} failed to parse reset time: {}",
-                                    self.config.vmid, why
+                                    self.config.vmid,
+                                    why
                                 );
 
                                 // Failed parses move to the grace period immediately.
@@ -217,6 +228,11 @@ impl SingleMachineMonitoring {
                                             ),
                                     );
                                     self.say("Watchdog failed to parse /tmp/watchdog_reset_after as a Unix time. Grace period started").await;
+                                    self.say(&format!(
+                                        "The current text in /tmp/watchdog_reset_after is: \n\n```\n{}\n```",
+                                        &reset_time,
+                                    ))
+                                    .await;
                                 }
                             }
 
@@ -267,9 +283,21 @@ impl SingleMachineMonitoring {
                 );
 
                 let reset_time: chrono::DateTime<chrono::Utc> = chrono::DateTime::from(reset_time);
-                self.say(&format!("Machine has not updated its reset time in a while (last update was at {reset_time}). Grace period started"))
+                self.say(&format!("Machine has not updated its /tmp/watchdog_reset_after in a while (last update was at {reset_time}). Grace period started"))
                     .await;
             }
+        }
+
+        // If the state is NoData,
+        // then that means that we haven't yet been able to read a value,
+        // so we start the grace period immediately.
+        if let SingleMachineMonitoringState::NoData = self.state {
+            self.state = SingleMachineMonitoringState::GracePeriod(
+                std::time::SystemTime::now()
+                    + std::time::Duration::from_secs(self.config.grace_period),
+            );
+            self.say("Could not read the next reset time from the file at /tmp/watchdog_reset_after. Grace period started")
+                .await;
         }
 
         // If the state is GracePeriod,
@@ -334,10 +362,7 @@ impl SingleMachineMonitoring {
     }
 
     pub async fn say(&self, message: &str) {
-        println!(
-            "status! VMID {} ({}): {}",
-            self.config.vmid, self.config.friendly_name, message
-        );
+        tracing::info!("MSG: {}", message);
 
         if let (Some(token), Some(chat_id)) = (
             &self.config.telegram_bot_token,

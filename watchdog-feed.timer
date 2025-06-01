@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Watchdog Service every minute
+
+[Timer]
+OnActiveSec=1min
+OnUnitActiveSec=1min
+Unit=watchdog-feed.service
+
+[Install]
+WantedBy=timers.target

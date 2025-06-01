@@ -1,3 +1,5 @@
+use tracing::Instrument;
+
 mod api;
 mod config;
 pub mod monitoring;
@@ -27,10 +29,14 @@ async fn main() {
 }
 
 async fn test_single_vm(api: api::Api, vm_config: config::VmConfig) {
-    let mut monitor = monitoring::SingleMachineMonitoring::new(api.clone(), vm_config);
+    let mut monitor = monitoring::SingleMachineMonitoring::new(api.clone(), vm_config.clone());
     monitor.say("Monitoring loop started!").await;
     loop {
-        monitor.tick().await;
+        let vmid = &vm_config.vmid;
+        monitor
+            .tick()
+            .instrument(tracing::info_span!("monitoring tick", vmid = vmid))
+            .await;
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }

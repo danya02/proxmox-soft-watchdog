@@ -1,0 +1,13 @@
+[Unit]
+Description=Watchdog Feed service
+Documentation=https://github.com/danya02/proxmox-soft-watchdog
+
+[Service]
+Type=oneshot
+
+# To run as long as the system is up:
+ExecStart=/bin/bash -c 'if [ -f /tmp/watchdog_current_unix_time ]; then current_time=$(< /tmp/watchdog_current_unix_time); echo $((current_time + 90)) > /tmp/watchdog_reset_after; fi'
+
+
+# To only run if the service called example.service is running, use this instead:
+##ExecStart=/bin/bash -c 'if systemctl is-active --quiet example.service; then if [ -f /tmp/watchdog_current_unix_time ]; then current_time=$(< /tmp/watchdog_current_unix_time); echo $((current_time + 90)) > /tmp/watchdog_reset_after; fi; else echo "example.service is down" > /tmp/watchdog_reset_after; fi'

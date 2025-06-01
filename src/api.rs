@@ -44,6 +44,7 @@ impl Api {
         if ticket_expiry > std::time::Instant::now() {
             let ticket = self.inner.ticket.lock().unwrap().clone().unwrap();
             let csrf = self.inner.csrf.lock().unwrap().clone().unwrap();
+            tracing::debug!("Reusing cached ticket");
             return (ticket, csrf);
         }
 
@@ -51,6 +52,7 @@ impl Api {
         // and check that it works.
         let ticket = self.inner.ticket.lock().unwrap().clone();
         if let Some(ticket) = ticket {
+            tracing::debug!("Testing cached ticket");
             if let Ok(res) = self
                 .client
                 .get(format!("{}/api2/json/access/ticket", self.inner.base_url))
@@ -59,7 +61,10 @@ impl Api {
                 .await
             {
                 if res.status().is_success() {
+                    tracing::debug!("Cached ticket is still valid");
                     let csrf = self.inner.csrf.lock().unwrap().clone().unwrap();
+                    *self.inner.ticket_expiry.lock().unwrap() =
+                        std::time::Instant::now() + std::time::Duration::from_secs(60);
                     return (ticket, csrf);
                 }
             }
@@ -67,6 +72,7 @@ impl Api {
 
         // If there is no cached ticket,
         // make a new one.
+        tracing::info!("Getting new ticket");
         let res = self
             .client
             .post(format!("{}/api2/json/access/ticket", self.inner.base_url))
@@ -100,6 +106,7 @@ impl Api {
         method: reqwest::Method,
         path: &str,
     ) -> reqwest::RequestBuilder {
+        tracing::debug!("Ticketed request {}", path);
         let url = format!("{}/api2/json{}", self.inner.base_url, path);
         let (ticket, csrf) = self.get_ticket().await;
         self.client
@@ -109,6 +116,7 @@ impl Api {
     }
 
     pub async fn ping_guest_agent(&self, config: &config::VmConfig) -> Result<(), reqwest::Error> {
+        tracing::debug!("Pinging guest agent");
         let res = self
             .ticketed_request(
                 reqwest::Method::POST,
@@ -128,6 +136,7 @@ impl Api {
         path: &str,
         content: &[u8],
     ) -> Result<(), reqwest::Error> {
+        tracing::debug!("Writing guest agent file {}", path);
         let content = base64::engine::general_purpose::STANDARD.encode(content);
         let res = self
             .ticketed_request(
@@ -146,7 +155,8 @@ impl Api {
             .send()
             .await?;
 
-        // Ok(res.error_for_status()?.text().await?);
+        res.error_for_status()?.text().await?;
+
         Ok(())
     }
 
@@ -155,6 +165,7 @@ impl Api {
         config: &config::VmConfig,
         path: &str,
     ) -> Result<String, reqwest::Error> {
+        tracing::debug!("Reading guest agent file {}", path);
         let res = self
             .ticketed_request(
                 reqwest::Method::GET,
@@ -179,6 +190,7 @@ impl Api {
         &self,
         config: &config::VmConfig,
     ) -> Result<bool, reqwest::Error> {
+        tracing::debug!("Getting VM status from hypervisor");
         let res = self
             .ticketed_request(
                 reqwest::Method::GET,
@@ -194,6 +206,7 @@ impl Api {
     }
 
     pub async fn reset_vm(&self, config: &config::VmConfig) -> Result<(), reqwest::Error> {
+        tracing::debug!("Resetting VM in hypervisor");
         let res = self
             .ticketed_request(
                 reqwest::Method::POST,
